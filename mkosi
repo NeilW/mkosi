@@ -858,27 +858,43 @@ def enable_networkmanager(workspace):
                     "enable", "NetworkManager"],
                    check=True)
 
-def run_workspace_command(args, workspace, *cmd, network=False, env={}):
 
-    cmdline = ["systemd-nspawn",
-               '--quiet',
-               "--directory=" + os.path.join(workspace, "root"),
-               "--uuid=" + args.machine_id,
-               "--machine=mkosi-" + uuid.uuid4().hex,
-               "--as-pid2",
-               "--register=no",
-               "--bind=" + var_tmp(workspace) + ":/var/tmp" ]
+def run_nspawn_command(machine_id, var_tmp_instance, target, *cmd,
+                       extras=[], network=False, env={}):
+    cmdline = [
+        "systemd-nspawn",
+        '--quiet',
+        target,
+        "--uuid=" + machine_id,
+        "--machine=mkosi-" + uuid.uuid4().hex,
+        "--as-pid2",
+        "--register=no",
+        "--bind=" + var_tmp_instance + ":/var/tmp"
+    ]
 
     if network:
         # If we're using the host network namespace, use the same resolver
-        cmdline += ["--bind-ro=/etc/resolv.conf"]
+        cmdline.append("--bind-ro=/etc/resolv.conf")
     else:
-        cmdline += ["--private-network"]
+        cmdline.append("--private-network")
 
-    cmdline += [ "--setenv={}={}".format(k,v) for k,v in env.items() ]
-
+    cmdline += extras
+    cmdline += ["--setenv={}={}".format(k, v) for k, v in env.items()]
     cmdline += ['--', *cmd]
     subprocess.run(cmdline, check=True)
+
+
+def run_workspace_command(args, workspace, *cmd, network=False, env={}):
+    run_nspawn_command(
+        args.machine_id,
+        var_tmp(workspace),
+        target="--directory=" + os.path.join(workspace, "root"),
+        *cmd,
+        extras=[],
+        network=network,
+        env=env
+    )
+
 
 def check_if_url_exists(url):
     req = urllib.request.Request(url, method="HEAD")
@@ -3162,6 +3178,7 @@ def build_image(args, workspace, run_build_script, for_cache=False):
 def var_tmp(workspace):
     return mkdir_last(os.path.join(workspace, "var-tmp"))
 
+
 def run_build_script(args, workspace, raw):
     if args.build_script is None:
         return
@@ -3170,42 +3187,43 @@ def run_build_script(args, workspace, raw):
         dest = os.path.join(workspace, "dest")
         os.mkdir(dest, 0o755)
 
-        target = "--directory=" + os.path.join(workspace, "root") if raw is None else "--image=" + raw.name
+        if raw is None:
+            target = "--directory=" + os.path.join(workspace, "root")
+        else:
+            target = "--image=" + raw.name
 
-        cmdline = ["systemd-nspawn",
-                   '--quiet',
-                   target,
-                   "--uuid=" + args.machine_id,
-                   "--machine=mkosi-" + uuid.uuid4().hex,
-                   "--as-pid2",
-                   "--register=no",
-                   "--bind", dest + ":/root/dest",
-                   "--bind=" + var_tmp(workspace) + ":/var/tmp",
-                   "--setenv=WITH_DOCS=" + ("1" if args.with_docs else "0"),
-                   "--setenv=WITH_TESTS=" + ("1" if args.with_tests else "0"),
-                   "--setenv=DESTDIR=/root/dest"]
+        build_env = {
+            "WITH_DOCS": "1" if args.with_docs else "0",
+            "WITH_TESTS": "1" if args.with_tests else "0",
+            "DEST_DIR": "/root/dest"
+        }
+
+        cmdline_extras = [
+            "--bind", dest + ":root/dest",
+        ]
 
         if args.build_sources is not None:
-            cmdline.append("--setenv=SRCDIR=/root/src")
-            cmdline.append("--chdir=/root/src")
-
+            build_env['SRCDIR'] = "/root/src"
+            cmdline_extras.append("--chdir=/root/src")
             if args.read_only:
-                cmdline.append("--overlay=+/root/src::/root/src")
+                cmdline_extras.append("--overlay=+/root/src::/root/src")
+
         else:
-            cmdline.append("--chdir=/root")
+            cmdline_extras.append("--chdir=/root")
 
         if args.build_dir is not None:
-            cmdline.append("--setenv=BUILDDIR=/root/build")
-            cmdline.append("--bind=" + args.build_dir + ":/root/build")
+            build_env['BUILDDIR'] = "/root/build"
+            cmdline_extras.append("--bind=" + args.build_dir + ":/root/build")
 
-        if args.with_network:
-            # If we're using the host network namespace, use the same resolver
-            cmdline.append("--bind-ro=/etc/resolv.conf")
-        else:
-            cmdline.append("--private-network")
-
-        cmdline.append("/root/" + os.path.basename(args.build_script))
-        subprocess.run(cmdline, check=True)
+        run_nspawn_command(
+            args.machine_id,
+            var_tmp(workspace),
+            target,
+            "/root/" + os.path.basename(args.build_script),
+            extras=cmdline_extras,
+            network=args.with_network,
+            env=build_env
+        )
 
 def need_cache_images(args):
 
